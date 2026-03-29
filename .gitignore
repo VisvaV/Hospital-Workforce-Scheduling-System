@@ -1,0 +1,23 @@
+# Environments
+venv/
+.env
+
+# Python compilation paths
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Agent & Instruction files specific to this environment
+directives/
+execution/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+
+# Sensitive/Project Documents
+Project Report - Sem 5.pdf
