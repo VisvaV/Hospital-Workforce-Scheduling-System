@@ -139,11 +139,13 @@ def show_admin_dashboard():
                     """, unsafe_allow_html=True)
                     
                     if st.button("Approve Swap Override", key=f"swap_{swp['_id']}", type="primary"):
-                        success = approve_swap(swp["_id"])
+                        success = approve_swap(swp["_id"], override=True)
                         if success:
                             st.success("Swap applied directly to Master Schedule.")
                         else:
                             st.error("Swap invalid context.")
+                        import time
+                        time.sleep(1.5)
                         st.rerun()
 
     with tabs[3]:
@@ -181,6 +183,6 @@ def show_admin_dashboard():
                 color = '#ff4b4b' if val == 0 else '#faca2b' if val == 1 else '#4caf50'
                 return f'background-color: {color}; color: black'
                 
-            st.dataframe(df_cov.style.applymap(color_intensity), use_container_width=True)
+            st.dataframe(df_cov.style.map(color_intensity), use_container_width=True)
         else:
             st.warning("Coverage matrix offline.")

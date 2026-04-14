@@ -26,22 +26,16 @@ def get_colleagues(department, role):
 def get_departments():
     return db["users"].distinct("department", {"department": {"$ne": None}})
 
-# --- Leave Management & Conflict Engine ---
-
+#leave and conflict checking engine
 def check_leave_conflict(user_id, request_date_str):
-    """
-    Checks if an employee is scheduled on the requested date, 
-    and whether approving this leave would leave the department with 0 coverage.
-    """
     user = db["users"].find_one({"id": user_id})
     if not user: return {"has_conflict": False, "reason": "User not found."}
     
-    # Parse date to obtain day of week
     try:
         date_obj = datetime.strptime(request_date_str, "%Y-%m-%d")
         day_name = date_obj.strftime("%A")
     except ValueError:
-        day_name = request_date_str # fallback if already a day string
+        day_name = request_date_str
         
     role = user["role"]
     dept = user["department"]
@@ -67,10 +61,6 @@ def check_leave_conflict(user_id, request_date_str):
     return {"has_conflict": True, "reason": "Employee is scheduled for a shift on this day, but coverage is viable."}
 
 def find_replacement(user_id, request_date_str):
-    """
-    Mini-CSP to find a valid replacement colleague. 
-    Constraint: NOT already assigned, max_shifts not exceeded, NOT their preferred off day.
-    """
     user = db["users"].find_one({"id": user_id})
     if not user: return None
     
@@ -85,7 +75,7 @@ def find_replacement(user_id, request_date_str):
     
     if not schedule: return None
     
-    # 1. Identify which shift the user is on
+    #1 identify vacant shift
     day_shifts = schedule["schedule"].get(day_name, {})
     user_shift = None
     for shift_num, assigned_name in day_shifts.items():
@@ -93,26 +83,23 @@ def find_replacement(user_id, request_date_str):
             user_shift = shift_num
             break
             
-    if not user_shift: return None # User isn't scheduled today
+    if not user_shift: return None 
     
-    # 2. Get colleagues
+    #2get colleagues
     colleagues = list(db["users"].find({"department": dept, "role": role, "id": {"$ne": user_id}}))
     
-    # 3. Filter candidates
+    #3 filter candidates
     for coll in colleagues:
-        # Check preferred off day
         if coll.get("preferred_off_day") == day_name:
             continue
-            
-        # Check if they are already working in the other shift on this day
+        
         already_working_today = False
         for s_num, a_name in day_shifts.items():
             if a_name == coll["name"]:
                 already_working_today = True
         if already_working_today:
             continue
-            
-        # Check max shifts
+    
         current_shifts = 0
         for d, s in schedule["schedule"].items():
             for s_num, a_name in s.items():
@@ -122,7 +109,6 @@ def find_replacement(user_id, request_date_str):
         if current_shifts >= coll.get("max_shifts_per_week", 5):
             continue
             
-        # Passed all constraints
         return {"colleague": coll["name"], "shift": user_shift, "day": day_name}
         
     return None
@@ -131,7 +117,6 @@ def submit_leave_request(user_id, name, department, request_date, duration="1 Da
     existing = db["requests"].find_one({"id": user_id, "Dates": request_date})
     if existing: return False
     
-    # Run conflict detection
     conflict_data = check_leave_conflict(user_id, request_date)
     
     data = {
@@ -152,10 +137,6 @@ def get_pending_requests():
     return list(db["requests"].find({"Status": "Pending"}))
 
 def update_request_status(request_id, action, request_dates):
-    """
-    Approves or denies a leave. 
-    If approved, runs auto-replacement and rewrites the schedule if a replacement exists.
-    """
     request_doc = db["requests"].find_one({"_id": request_id})
     if not request_doc: return False
     
@@ -163,13 +144,11 @@ def update_request_status(request_id, action, request_dates):
     new_status = "Approved" if action == "accept" else "Denied"
     db["requests"].update_one({"_id": request_id}, {"$set": {"Status": new_status}})
     
-    # Post-approval replacement execution
     if action == "accept":
-        # Loop through dates
         for date_str in request_dates:
             replacement_info = find_replacement(user_id, date_str)
             if replacement_info:
-                # Automate swap in schedules DB
+        
                 user = db["users"].find_one({"id": user_id})
                 role = user["role"]
                 dept = user["department"]
@@ -177,24 +156,21 @@ def update_request_status(request_id, action, request_dates):
                 shift_name = replacement_info["shift"]
                 new_candidate = replacement_info["colleague"]
                 
-                # Retrieve existing schedule
                 sched_doc = db["schedules"].find_one({"role": role, "department": dept})
                 if sched_doc:
-                    # Update local ref
+                    
                     sched_doc["schedule"][day_name][shift_name] = new_candidate
                     db["schedules"].update_one({"_id": sched_doc["_id"]}, {"$set": {"schedule": sched_doc["schedule"]}})
-                    # Record replacement in request
+                    
                     db["requests"].update_one({"_id": request_id}, {"$push": {"replacement": new_candidate}})
     
-    # Notification
+    #notification
     subject = "Update On Your Leave Request"
     dates_str = ",".join(request_dates) if isinstance(request_dates, list) else request_dates
     body = f"Dear User,\n\nYour leave request for {dates_str} has been {new_status}.\n\nThank you."
     send_email(subject, body, "visvafelix2005@gmail.com")
     
     return new_status
-
-# --- Shift Swapping ---
 
 def request_shift_swap(requester_id, target_name, shift_date, shift_num):
     user = db["users"].find_one({"id": requester_id})
@@ -212,13 +188,13 @@ def request_shift_swap(requester_id, target_name, shift_date, shift_num):
 def get_pending_swaps():
     return list(db["swap_requests"].find({"Status": "Pending"}))
 
-def approve_swap(swap_id):
+def approve_swap(swap_id, override=False):
     swap_doc = db["swap_requests"].find_one({"_id": swap_id})
     if not swap_doc: return False
     
-    # Get user details
     requester = db["users"].find_one({"id": swap_doc["requester_id"]})
-    if not requester: return False
+    target = db["users"].find_one({"name": swap_doc["target_name"]})
+    if not requester or not target: return False
     
     try:
         day_name = datetime.strptime(swap_doc["shift_date"], "%Y-%m-%d").strftime("%A")
@@ -230,14 +206,28 @@ def approve_swap(swap_id):
     sched_doc = db["schedules"].find_one({"role": role, "department": dept})
     
     if sched_doc:
-        # Perform swap directly
+        if not override:
+            if target.get("preferred_off_day") == day_name:
+                return False
+                
+            day_shifts = sched_doc["schedule"].get(day_name, {})
+            if any(name == target["name"] for name in day_shifts.values()):
+                return False
+                
+            current_shifts = 0
+            for d, shifts in sched_doc["schedule"].items():
+                if any(name == target["name"] for name in shifts.values()):
+                    current_shifts += 1
+            
+            if current_shifts >= target.get("max_shifts_per_week", 5):
+                return False
+            
         sched_doc["schedule"][day_name][swap_doc["shift_num"]] = swap_doc["target_name"]
         db["schedules"].update_one({"_id": sched_doc["_id"]}, {"$set": {"schedule": sched_doc["schedule"]}})
         db["swap_requests"].update_one({"_id": swap_id}, {"$set": {"Status": "Approved"}})
         return True
     return False
 
-# --- Core Schedule Loading ---
 
 def save_schedule(role, schedule_data, fairness_scores):
     db["schedules"].delete_many({"role": role})
@@ -268,31 +258,24 @@ def get_personal_schedule(name):
                     personal[day].append(f"{shift_name} ({dept})")
     return personal
 
-# --- Analytics ---
 def get_analytics_data():
-    """
-    Returns data aggregations for Admin charts.
-    """
     ans = {
         "shift_distribution": {},
         "leave_frequency": {},
         "coverage": {}
     }
     
-    # Shift distribution (from Fairness scores)
     schedules = list(db["schedules"].find({}))
     for s in schedules:
         scores = s.get("fairness_scores", {})
         for emp, count in scores.items():
             ans["shift_distribution"][emp] = count
             
-    # Leave frequency per department
     reqs = db["requests"].find()
     for r in reqs:
         d = r.get("Dept", "Unknown")
         ans["leave_frequency"][d] = ans["leave_frequency"].get(d, 0) + 1
         
-    # Department Coverage mapping
     for s in schedules:
         dept = s["department"]
         ans["coverage"][dept] = {}
@@ -301,7 +284,6 @@ def get_analytics_data():
             
     return ans
 
-# --- Mailing ---
 def send_email(subject, body, to_address="visvafelix2005@gmail.com"):
     smtp_server = 'smtp.gmail.com'
     smtp_port = 587
